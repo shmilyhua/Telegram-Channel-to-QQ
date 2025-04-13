@@ -1,0 +1,10 @@
+[project]
+name = "Telegram-Channel-to-QQ"
+version = "1.0.0"
+description = "Telegram-Channel-to-QQ 是一个 Telegram 频道消息同步转发到 QQ 群的机器人，支持文本、链接和图片媒体消息的转发。"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "python-dotenv>=1.1.0",
+    "python-telegram-bot>=22.0",
+]
