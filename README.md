@@ -24,7 +24,7 @@
 ### 1. 克隆项目仓库
 
 ```shell
-git clone git@github.com:NahidaBuer/Telegram-Channel-to-QQ.git
+git clone https://github.com/shmilyhua/Telegram-Channel-to-QQ.git
 cd Telegram-Channel-to-QQ
 ```
 
