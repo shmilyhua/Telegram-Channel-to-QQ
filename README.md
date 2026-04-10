@@ -1,3 +1,6 @@
+[![Fork](https://img.shields.io/badge/Forked_From-Original_Project-lightgrey.svg)](https://github.com/NahidaBuer/Telegram-Channel-to-QQ)
+[![Modified by AI](https://img.shields.io/badge/Modified_By-Gemini-blue.svg)](https://gemini.google.com)
+> **Note:** This repository is a modified fork of [Telegram-Channel-to-QQ](https://github.com/NahidaBuer/Telegram-Channel-to-QQ). The modifications, refactoring, and new features introduced in this fork were primarily implemented using Gemini.
 # Telegram-Multi-Platform-Forwarder
 
 一个基于 Python 的异步 Telegram 频道消息同步转发机器人。支持将 Telegram 频道的文本、链接、图片和视频自动同步至 QQ 群（基于 Napcat）、Discord 和飞书。
