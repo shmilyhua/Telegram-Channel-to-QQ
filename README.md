@@ -14,7 +14,7 @@
 
 ## 系统要求
 
-* [cite_start]Python 3.13 或更高版本 [cite: 3]
+* Python 3.13 或更高版本
 * [uv](https://github.com/astral-sh/uv) 现代 Python 包管理工具
 * **FFmpeg**：**必须全局安装**，用于处理视频压缩和封面提取。
 * 已正确配置并运行的 Napcat 正向 HTTP 服务器（用于 QQ 转发）。
@@ -47,14 +47,14 @@ cp .env.example .env
 
 | 变量名 | 说明 |
 | :--- | :--- |
-| `BOT_TOKEN` | [cite_start]Telegram Bot Token [cite: 1] |
-| `CHANNEL_IDS` | [cite_start]需要监听的 Telegram 频道 ID 列表（逗号分隔） [cite: 1] |
-| `NAPCAT_HTTP_URL` | [cite_start]Napcat 正向 HTTP 服务器地址 [cite: 1] |
-| `QQ_GROUP_ID` | [cite_start]目标转发 QQ 群号 [cite: 1] |
-| `DISCORD_BOT_TOKEN` | [cite_start]Discord Bot 凭证 [cite: 1] |
-| `DISCORD_CHANNEL_ID` | [cite_start]目标 Discord 频道 ID [cite: 1] |
-| `FEISHU_APP_ID` / `SECRET` | [cite_start]飞书自建应用的凭证（用于获取 Token 上传图片） [cite: 1] |
-| `FEISHU_WEBHOOK_URL` | [cite_start]飞书群机器人的 Webhook 地址 [cite: 1] |
+| `BOT_TOKEN` | Telegram Bot Token |
+| `CHANNEL_IDS` | 需要监听的 Telegram 频道 ID 列表（逗号分隔） |
+| `NAPCAT_HTTP_URL` | Napcat 正向 HTTP 服务器地址 |
+| `QQ_GROUP_ID` | 目标转发 QQ 群号 |
+| `DISCORD_BOT_TOKEN` | Discord Bot 凭证 |
+| `DISCORD_CHANNEL_ID` | 目标 Discord 频道 ID |
+| `FEISHU_APP_ID` / `SECRET` | 飞书自建应用的凭证（用于获取 Token 上传图片） |
+| `FEISHU_WEBHOOK_URL` | 飞书群机器人的 Webhook 地址 |
 
 *获取 Telegram 频道 ID 提示：若客户端不显示，可将 Bot 加入频道并发送一条消息，访问 `https://api.telegram.org/bot<BOT_TOKEN>/getUpdates` 查看 `chat.id`。*
 
