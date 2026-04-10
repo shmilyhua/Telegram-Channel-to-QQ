@@ -1,27 +1,31 @@
-# Telegram-Channel-to-QQ 项目文档
+# Telegram-Multi-Platform-Forwarder
 
-Telegram-Channel-to-QQ 是一个 Telegram 频道消息同步转发到 QQ 群的机器人，支持文本、链接和图片媒体消息的转发。
+一个基于 Python 的异步 Telegram 频道消息同步转发机器人。支持将 Telegram 频道的文本、链接、图片和视频自动同步至 QQ 群（基于 Napcat）、Discord 和飞书。
 
 ## 功能特点
 
-* 转发 Telegram 频道文本消息到 QQ 群
-* 支持转发带链接的消息
-* 支持单张图片及图片组转发
-* 自动合并媒体组（多张图片）消息
+* **多平台同步转发**：支持并发推送到 QQ 群、Discord 频道和飞书（Webhook）。
+* **全媒体类型支持**：支持转发纯文本、带链接的文本、单张图片/视频以及媒体组（相册）。
+* **自动合并媒体组**：原生支持 Telegram 的 Media Group，自动缓存并合并同一相册内的图片和视频后统一发送。
+* **内联按钮链接提取**：自动抓取 Telegram 消息下方 Inline Keyboard（内联键盘）的按钮链接，并在正文后追加。
+* **智能视频处理**：
+  * **Discord 适配**：针对 Discord 严格的 8MB 限制，自动调用 FFmpeg 进行动态码率压缩；若压缩后仍超限，则优雅降级仅发送图文。
+  * **飞书适配**：由于飞书 Webhook 不支持直接上传视频，系统会自动调用 FFmpeg 提取视频首帧作为封面图发送，并附带视频接收提示。
 
 ## 系统要求
 
-* Python 3.13+
-* uv 包管理工具
-* 已正确配置 napcat 的正向 http 服务器连接
+* [cite_start]Python 3.13 或更高版本 [cite: 3]
+* [uv](https://github.com/astral-sh/uv) 现代 Python 包管理工具
+* **FFmpeg**：**必须全局安装**，用于处理视频压缩和封面提取。
+* 已正确配置并运行的 Napcat 正向 HTTP 服务器（用于 QQ 转发）。
 
 ## 安装
 
 ### 1. 克隆项目仓库
 
-
 ```shell
 git clone git@github.com:NahidaBuer/Telegram-Channel-to-QQ.git
+cd Telegram-Channel-to-QQ
 ```
 
 ### 2. 使用 uv 创建虚拟环境并安装依赖
@@ -33,73 +37,42 @@ uv sync
 
 ## 配置
 
-在项目根目录创建 .env 文件，并设置环境变量。
+在项目根目录创建 `.env` 文件，并设置相关环境变量。
 
 ```shell
 cp .env.example .env
 ```
 
-### 获取 Telegram 频道 ID
+### 核心环境变量说明
 
-如果你的 telegram 客户端不支持显示 channel id 的话，可以这样获取：
+| 变量名 | 说明 |
+| :--- | :--- |
+| `BOT_TOKEN` | [cite_start]Telegram Bot Token [cite: 1] |
+| `CHANNEL_IDS` | [cite_start]需要监听的 Telegram 频道 ID 列表（逗号分隔） [cite: 1] |
+| `NAPCAT_HTTP_URL` | [cite_start]Napcat 正向 HTTP 服务器地址 [cite: 1] |
+| `QQ_GROUP_ID` | [cite_start]目标转发 QQ 群号 [cite: 1] |
+| `DISCORD_BOT_TOKEN` | [cite_start]Discord Bot 凭证 [cite: 1] |
+| `DISCORD_CHANNEL_ID` | [cite_start]目标 Discord 频道 ID [cite: 1] |
+| `FEISHU_APP_ID` / `SECRET` | [cite_start]飞书自建应用的凭证（用于获取 Token 上传图片） [cite: 1] |
+| `FEISHU_WEBHOOK_URL` | [cite_start]飞书群机器人的 Webhook 地址 [cite: 1] |
 
-1. 将机器人添加到目标频道
-2. 在频道中发送一条消息
-3. 访问 `https://api.telegram.org/bot<BOT_TOKEN>/getUpdates` 查看 update 中的 chat.id
+*获取 Telegram 频道 ID 提示：若客户端不显示，可将 Bot 加入频道并发送一条消息，访问 `https://api.telegram.org/bot<BOT_TOKEN>/getUpdates` 查看 `chat.id`。*
 
-### 运行
+## 运行
+
+确保已完成上述配置，并且系统环境已安装 FFmpeg，然后执行：
 
 ```shell
 uv run bot.py
 ```
 
-## 开发指南
-
-### 依赖说明
-
-主要依赖包括：
-
-* python-telegram-bot: Telegram Bot API 的 Python 封装
-* httpx: 异步 HTTP 客户端（由 telegram 库引入）
-* python-dotenv: 环境变量管理
-
-### 媒体组处理流程
-
-1. 接收带有 media_group_id 的消息
-2. 将消息存储到临时字典中
-3. 设置定时任务等待所有媒体消息到达
-4. 超时后将所有图片和文字一次性发送到 QQ 群
-
 ## 问题排查
 
-### 环境变量无法更新
-
-如果更新 .env 文件后环境变量未生效：
-
-1. 确保正确调用了 load_dotenv()
-2. 重启程序以加载新的环境变量值
-3. 检查 .env 文件格式是否正确
-4. 验证文件路径是否正确
-5. 检查系统环境变量是否覆盖了 .env 中的设置
-
-### QQ 消息未正确发送
-
-1. 确认 NAPCAT_HTTP_URL 设置正确
-2. 检查 QQ 机器人服务是否正常运行
-3. 验证 GROUP_ID 是否正确设置
-
-## 更新日志
-
-### v1.0.0
-
-* 初始版本发布
-* 支持文本和图片消息转发
-* 支持媒体组消息处理
-
-## 贡献
-
-欢迎提交 Issues 或 Pull Requests 来改进本项目。
+* **视频处理失败/不发送**：检查服务器是否正确安装了 `ffmpeg` 并配置在了系统环境变量 (PATH) 中。
+* **飞书图片未显示**：飞书 Webhook 需要通过 Tenant Access Token 上传图片。请确保 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 正确无误。
+* **环境变量未生效**：更新 `.env` 文件后，必须重启机器人进程（`load_dotenv()` 仅在启动时加载）。
+* **Discord Payload Too Large**：若源视频体积过大，即使经过 FFmpeg 压缩也可能超过 8MB。此时程序会自动降级为发送文本与图片并忽略视频。
 
 ## 许可证
 
-GPLv3, 但是不允许售卖或提供付费托管服务，除非取得所有者另行同意。
+本项目使用 **GPLv3** 协议，并附加 **Commons Clause** 限制：不允许出售本软件，也不允许将其作为付费托管服务提供，除非取得版权所有者明示同意。
