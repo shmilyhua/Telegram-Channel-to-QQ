@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import asyncio
 import logging
@@ -79,6 +80,17 @@ async def post_stop(application: Application):
 
 
 # --- Utility Functions ---
+
+def escape_discord_markdown(text: str | None) -> str:
+    if not text:
+        return ""
+    
+    parts = re.split(r'(https?://\S+)', text)
+    for i in range(0, len(parts), 2):
+        parts[i] = re.sub(r'([_*~`|])', r'\\\1', parts[i])
+        
+    return "".join(parts)
+
 
 async def extract_thumbnail_from_url(video_url: str) -> bytes | None:
     fd_out, out_path = tempfile.mkstemp(suffix=".jpg")
@@ -161,9 +173,9 @@ async def send_to_discord(http_client: httpx.AsyncClient, text: str | None, phot
     api_url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages"
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
     
-    content = text or ""
+    content = escape_discord_markdown(text)
     for link_text, url in urls:
-        content += f"\n{link_text}: {url}"
+        content += f"\n{escape_discord_markdown(link_text)}: {url}"
         
     payload: dict[str, Any] = {"content": content}
     if photo_urls:
@@ -269,7 +281,7 @@ async def send_to_feishu(http_client: httpx.AsyncClient, text: str | None, photo
                     post_content.append([{"tag": "img", "image_key": image_key}])
 
         for video_url in video_urls:
-            post_content.append([{"tag": "text", "text": "🎬 [Video Received - View in Telegram/QQ/Discord]"}])
+            post_content.append([{"tag": "text", "text": "🎬 [Video Received - View in Telegram/QQ]"}])
             
             if token:
                 thumbnail_bytes = await extract_thumbnail_from_url(video_url)
