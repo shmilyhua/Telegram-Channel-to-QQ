@@ -108,7 +108,7 @@ async def extract_thumbnail_from_url(video_url: str) -> bytes | None:
 
 # --- Platform Sender Implementations ---
 
-async def send_to_qq(http_client: httpx.AsyncClient, text: str | None, photo_urls: list[str], video_urls: list[str], urls: dict[str, str]):
+async def send_to_qq(http_client: httpx.AsyncClient, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
     if not NAPCAT_URL or not QQ_GROUP_ID:
         return
 
@@ -124,7 +124,7 @@ async def send_to_qq(http_client: httpx.AsyncClient, text: str | None, photo_url
         if text:
             content_list.append({"type": "text", "data": {"text": text}})
             
-        for link_text, url in urls.items():
+        for link_text, url in urls:
             content_list.append({"type": "text", "data": {"text": f"{link_text}\n{url}"}})
 
         if not content_list:
@@ -154,7 +154,7 @@ async def send_to_qq(http_client: httpx.AsyncClient, text: str | None, photo_url
         logging.exception("QQ Sender failed")
 
 
-async def send_to_discord(http_client: httpx.AsyncClient, text: str | None, photo_urls: list[str], video_urls: list[str], urls: dict[str, str]):
+async def send_to_discord(http_client: httpx.AsyncClient, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
     if not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
         return
 
@@ -162,7 +162,7 @@ async def send_to_discord(http_client: httpx.AsyncClient, text: str | None, phot
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
     
     content = text or ""
-    for link_text, url in urls.items():
+    for link_text, url in urls:
         content += f"\n{link_text}: {url}"
         
     payload: dict[str, Any] = {"content": content}
@@ -243,7 +243,7 @@ async def upload_image_to_feishu(http_client: httpx.AsyncClient, token: str, pho
         return None
 
 
-async def send_to_feishu(http_client: httpx.AsyncClient, text: str | None, photo_urls: list[str], video_urls: list[str], urls: dict[str, str]):
+async def send_to_feishu(http_client: httpx.AsyncClient, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
     if not FEISHU_WEBHOOK_URL:
         return
 
@@ -253,7 +253,7 @@ async def send_to_feishu(http_client: httpx.AsyncClient, text: str | None, photo
             logging.error("Feishu Webhook warning: App ID/Secret missing or invalid. Images will fail to upload.")
 
         content = text or ""
-        for link_text, url in urls.items():
+        for link_text, url in urls:
             content += f"\n{link_text}: {url}"
             
         post_content = []
@@ -312,7 +312,7 @@ async def send_to_feishu(http_client: httpx.AsyncClient, text: str | None, photo
 
 # --- Dispatcher ---
 
-async def dispatch_message(context: ContextTypes.DEFAULT_TYPE, text: str | None, photo_urls: list[str], video_urls: list[str], urls: dict[str, str]):
+async def dispatch_message(context: ContextTypes.DEFAULT_TYPE, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
     http_client: httpx.AsyncClient = context.bot_data["http_client"]
     
     tasks = [
@@ -329,23 +329,23 @@ async def dispatch_message(context: ContextTypes.DEFAULT_TYPE, text: str | None,
 
 # --- Telegram Utility Functions ---
 
-def get_url_dict_from_message(message: Message, is_caption: bool = False) -> dict[str, str]:
-    urls: dict[str, str] = {}
+def get_url_dict_from_message(message: Message, is_caption: bool = False) -> list[tuple[str, str]]:
+    urls: list[tuple[str, str]] = []
     entities_dict = message.parse_caption_entities([MessageEntity.TEXT_LINK]) if is_caption else message.parse_entities([MessageEntity.TEXT_LINK])
     
     for entity, text in entities_dict.items():
         if entity.url:
-            urls[text] = entity.url
+            urls.append((text, entity.url))
     return urls
 
 
-def get_button_urls(message: Message) -> dict[str, str]:
-    urls: dict[str, str] = {}
+def get_button_urls(message: Message) -> list[tuple[str, str]]:
+    urls: list[tuple[str, str]] = []
     if message.reply_markup and hasattr(message.reply_markup, 'inline_keyboard'):
         for row in message.reply_markup.inline_keyboard:
             for button in row:
                 if button.url:
-                    urls[f"🔗 {button.text}"] = button.url
+                    urls.append((f"🔗 {button.text}", button.url))
     return urls
 
 
@@ -398,10 +398,10 @@ async def process_media_group_messages(messages: list[Message], context: Context
             if video_url:
                 video_urls.append(video_url)
 
-    text_urls: dict[str, str] = {}
+    text_urls: list[tuple[str, str]] = []
     if caption_message:
-        text_urls.update(get_url_dict_from_message(caption_message, is_caption=True))
-        text_urls.update(get_button_urls(caption_message))
+        text_urls.extend(get_url_dict_from_message(caption_message, is_caption=True))
+        text_urls.extend(get_button_urls(caption_message))
         
     await dispatch_message(context=context, text=caption, photo_urls=photo_urls, video_urls=video_urls, urls=text_urls)
 
@@ -428,7 +428,7 @@ async def channel_message_handler(update: Update, context: ContextTypes.DEFAULT_
 
     if message.text:
         urls = get_url_dict_from_message(message, is_caption=False)
-        urls.update(get_button_urls(message))
+        urls.extend(get_button_urls(message))
         await dispatch_message(context=context, text=message.text, photo_urls=[], video_urls=[], urls=urls)
         
     elif message.photo or message.video:
@@ -443,7 +443,7 @@ async def channel_message_handler(update: Update, context: ContextTypes.DEFAULT_
             if url: video_urls.append(url)
             
         text_urls = get_url_dict_from_message(message, is_caption=True)
-        text_urls.update(get_button_urls(message))
+        text_urls.extend(get_button_urls(message))
         
         await dispatch_message(context=context, text=message.caption, photo_urls=photo_urls, video_urls=video_urls, urls=text_urls)
 
