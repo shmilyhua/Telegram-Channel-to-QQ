@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import json
 import asyncio
 import logging
@@ -120,9 +121,11 @@ async def extract_thumbnail_from_url(video_url: str) -> bytes | None:
 
 # --- Platform Sender Implementations ---
 
-async def send_to_qq(http_client: httpx.AsyncClient, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
+async def send_to_qq(context: ContextTypes.DEFAULT_TYPE, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
     if not NAPCAT_URL or not QQ_GROUP_ID:
         return
+
+    http_client: httpx.AsyncClient = context.bot_data["http_client"]
 
     try:
         content_list: list[dict[str, Any]] = []
@@ -166,10 +169,11 @@ async def send_to_qq(http_client: httpx.AsyncClient, text: str | None, photo_url
         logging.exception("QQ Sender failed")
 
 
-async def send_to_discord(http_client: httpx.AsyncClient, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
+async def send_to_discord(context: ContextTypes.DEFAULT_TYPE, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
     if not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
         return
 
+    http_client: httpx.AsyncClient = context.bot_data["http_client"]
     api_url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages"
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
     
@@ -219,13 +223,34 @@ async def send_to_discord(http_client: httpx.AsyncClient, text: str | None, phot
         logging.exception("Discord API error")
 
 
-async def get_feishu_tenant_access_token(http_client: httpx.AsyncClient) -> str | None:
+async def get_feishu_tenant_access_token(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    bot_data = context.bot_data
+    current_time = time.time()
+    
+    cached_token = bot_data.get("feishu_token")
+    token_expiry = bot_data.get("feishu_token_expiry", 0)
+    
+    # Return cached token if it is valid for at least another 5 minutes
+    if cached_token and current_time < (token_expiry - 300):
+        return cached_token
+
+    http_client: httpx.AsyncClient = bot_data["http_client"]
     url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
     payload = {"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET}
+    
     try:
         response = await http_client.post(url, json=payload)
         response.raise_for_status()
-        return response.json().get("tenant_access_token")
+        resp_json = response.json()
+        
+        token = resp_json.get("tenant_access_token")
+        expire = resp_json.get("expire", 7200)
+        
+        if token:
+            bot_data["feishu_token"] = token
+            bot_data["feishu_token_expiry"] = current_time + expire
+            
+        return token
     except Exception:
         logging.exception("Failed to retrieve Feishu tenant access token")
         return None
@@ -255,12 +280,14 @@ async def upload_image_to_feishu(http_client: httpx.AsyncClient, token: str, pho
         return None
 
 
-async def send_to_feishu(http_client: httpx.AsyncClient, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
+async def send_to_feishu(context: ContextTypes.DEFAULT_TYPE, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
     if not FEISHU_WEBHOOK_URL:
         return
 
+    http_client: httpx.AsyncClient = context.bot_data["http_client"]
+
     try:
-        token = await get_feishu_tenant_access_token(http_client)
+        token = await get_feishu_tenant_access_token(context)
         if not token:
             logging.error("Feishu Webhook warning: App ID/Secret missing or invalid. Images will fail to upload.")
 
@@ -281,7 +308,7 @@ async def send_to_feishu(http_client: httpx.AsyncClient, text: str | None, photo
                     post_content.append([{"tag": "img", "image_key": image_key}])
 
         for video_url in video_urls:
-            post_content.append([{"tag": "text", "text": "🎬 [Video Received - View in Telegram/QQ]"}])
+            post_content.append([{"tag": "text", "text": "🎬 [Video Received - View in Telegram/QQ/Discord]"}])
             
             if token:
                 thumbnail_bytes = await extract_thumbnail_from_url(video_url)
@@ -325,12 +352,10 @@ async def send_to_feishu(http_client: httpx.AsyncClient, text: str | None, photo
 # --- Dispatcher ---
 
 async def dispatch_message(context: ContextTypes.DEFAULT_TYPE, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
-    http_client: httpx.AsyncClient = context.bot_data["http_client"]
-    
     tasks = [
-        send_to_qq(http_client, text, photo_urls, video_urls, urls),
-        send_to_discord(http_client, text, photo_urls, video_urls, urls),
-        send_to_feishu(http_client, text, photo_urls, video_urls, urls)
+        send_to_qq(context, text, photo_urls, video_urls, urls),
+        send_to_discord(context, text, photo_urls, video_urls, urls),
+        send_to_feishu(context, text, photo_urls, video_urls, urls)
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
