@@ -14,6 +14,7 @@ from telegram.ext import (
     filters,
     CommandHandler,
     ContextTypes,
+    Application,
 )
 
 load_dotenv()
@@ -23,18 +24,21 @@ logging.basicConfig(
 )
 
 # --- Configuration & Validation ---
-channel_ids = [
-    int(channel_id.strip())
-    for channel_id in os.getenv("CHANNEL_IDS", "-100_00000_00000").split(",")
-]
+channel_ids_env = os.getenv("CHANNEL_IDS", "-100_00000_00000")
+channel_ids = [int(cid.strip()) for cid in channel_ids_env.split(",") if cid.strip()]
+
 bot_token = os.getenv("BOT_TOKEN")
 if not bot_token:
     raise ValueError("BOT_TOKEN environment variable is required")
 
 # QQ / Napcat Config
 NAPCAT_URL = os.getenv("NAPCAT_HTTP_URL")
-QQ_GROUP_ID = int(os.getenv("QQ_GROUP_ID", 0))
-QQ_ID = int(os.getenv("QQ_ID", 10000))
+qq_group_id_env = os.getenv("QQ_GROUP_ID", "")
+QQ_GROUP_ID = int(qq_group_id_env) if qq_group_id_env else 0
+
+qq_id_env = os.getenv("QQ_ID", "")
+QQ_ID = int(qq_id_env) if qq_id_env else 10000
+
 QQ_NICKNAME = os.getenv("QQ_NICKNAME", "QQ")
 
 if bool(NAPCAT_URL) != bool(QQ_GROUP_ID):
@@ -57,18 +61,26 @@ FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL")
 if not all([FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_WEBHOOK_URL]):
     logging.warning("Feishu configuration is incomplete. Feishu forwarding will not function.")
 
-# State & HTTP Client
+# State
 media_group_messages: dict[str, list[Message]] = {}
 MEDIA_GROUP_TIMEOUT = 5
 
-# Extended timeout configuration to handle large media operations robustly
-http_client = httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0))
+# --- Lifecycle Hooks ---
+
+async def post_init(application: Application):
+    application.bot_data["http_client"] = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
+    )
+
+async def post_stop(application: Application):
+    http_client: httpx.AsyncClient | None = application.bot_data.get("http_client")
+    if http_client:
+        await http_client.aclose()
 
 
 # --- Utility Functions ---
 
 async def extract_thumbnail_from_url(video_url: str) -> bytes | None:
-    """Extracts the first frame of a remote video using FFmpeg without downloading the entire file."""
     fd_out, out_path = tempfile.mkstemp(suffix=".jpg")
     os.close(fd_out)
     
@@ -96,7 +108,7 @@ async def extract_thumbnail_from_url(video_url: str) -> bytes | None:
 
 # --- Platform Sender Implementations ---
 
-async def send_to_qq(text: str | None, photo_urls: list[str], video_urls: list[str], urls: dict[str, str]):
+async def send_to_qq(http_client: httpx.AsyncClient, text: str | None, photo_urls: list[str], video_urls: list[str], urls: dict[str, str]):
     if not NAPCAT_URL or not QQ_GROUP_ID:
         return
 
@@ -142,7 +154,7 @@ async def send_to_qq(text: str | None, photo_urls: list[str], video_urls: list[s
         logging.exception("QQ Sender failed")
 
 
-async def send_to_discord(text: str | None, photo_urls: list[str], video_urls: list[str], urls: dict[str, str]):
+async def send_to_discord(http_client: httpx.AsyncClient, text: str | None, photo_urls: list[str], video_urls: list[str], urls: dict[str, str]):
     if not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
         return
 
@@ -195,7 +207,7 @@ async def send_to_discord(text: str | None, photo_urls: list[str], video_urls: l
         logging.exception("Discord API error")
 
 
-async def get_feishu_tenant_access_token() -> str | None:
+async def get_feishu_tenant_access_token(http_client: httpx.AsyncClient) -> str | None:
     url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
     payload = {"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET}
     try:
@@ -207,7 +219,7 @@ async def get_feishu_tenant_access_token() -> str | None:
         return None
 
 
-async def upload_image_to_feishu(token: str, photo_url: str) -> str | None:
+async def upload_image_to_feishu(http_client: httpx.AsyncClient, token: str, photo_url: str) -> str | None:
     try:
         img_response = await http_client.get(photo_url)
         img_response.raise_for_status()
@@ -231,12 +243,12 @@ async def upload_image_to_feishu(token: str, photo_url: str) -> str | None:
         return None
 
 
-async def send_to_feishu(text: str | None, photo_urls: list[str], video_urls: list[str], urls: dict[str, str]):
+async def send_to_feishu(http_client: httpx.AsyncClient, text: str | None, photo_urls: list[str], video_urls: list[str], urls: dict[str, str]):
     if not FEISHU_WEBHOOK_URL:
         return
 
     try:
-        token = await get_feishu_tenant_access_token()
+        token = await get_feishu_tenant_access_token(http_client)
         if not token:
             logging.error("Feishu Webhook warning: App ID/Secret missing or invalid. Images will fail to upload.")
 
@@ -252,7 +264,7 @@ async def send_to_feishu(text: str | None, photo_urls: list[str], video_urls: li
 
         for photo_url in photo_urls:
             if token:
-                image_key = await upload_image_to_feishu(token, photo_url)
+                image_key = await upload_image_to_feishu(http_client, token, photo_url)
                 if image_key:
                     post_content.append([{"tag": "img", "image_key": image_key}])
 
@@ -300,25 +312,30 @@ async def send_to_feishu(text: str | None, photo_urls: list[str], video_urls: li
 
 # --- Dispatcher ---
 
-async def dispatch_message(text: str | None, photo_urls: list[str], video_urls: list[str], urls: dict[str, str]):
+async def dispatch_message(context: ContextTypes.DEFAULT_TYPE, text: str | None, photo_urls: list[str], video_urls: list[str], urls: dict[str, str]):
+    http_client: httpx.AsyncClient = context.bot_data["http_client"]
+    
     tasks = [
-        send_to_qq(text, photo_urls, video_urls, urls),
-        send_to_discord(text, photo_urls, video_urls, urls),
-        send_to_feishu(text, photo_urls, video_urls, urls)
+        send_to_qq(http_client, text, photo_urls, video_urls, urls),
+        send_to_discord(http_client, text, photo_urls, video_urls, urls),
+        send_to_feishu(http_client, text, photo_urls, video_urls, urls)
     ]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    for res in results:
+        if isinstance(res, Exception):
+            logging.error(f"Dispatch task failed: {res}", exc_info=res)
 
 
 # --- Telegram Utility Functions ---
 
-async def get_url_dict_from_message_entities(text: str | None, entities: Sequence[MessageEntity] | None) -> dict[str, str]:
-    if text is None or entities is None:
-        return {}
+def get_url_dict_from_message(message: Message, is_caption: bool = False) -> dict[str, str]:
     urls: dict[str, str] = {}
-    for entity in entities:
-        if entity.type == "text_link":
-            assert entity.url is not None
-            urls[text[entity.offset : entity.offset + entity.length]] = entity.url
+    entities_dict = message.parse_caption_entities([MessageEntity.TEXT_LINK]) if is_caption else message.parse_entities([MessageEntity.TEXT_LINK])
+    
+    for entity, text in entities_dict.items():
+        if entity.url:
+            urls[text] = entity.url
     return urls
 
 
@@ -359,17 +376,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Forwarder Bot is running.")
 
 
-async def process_media_group(media_group_id: str, context: ContextTypes.DEFAULT_TYPE):
-    if media_group_id not in media_group_messages:
+async def process_media_group_messages(messages: list[Message], context: ContextTypes.DEFAULT_TYPE):
+    if not messages:
         return
-
-    # Failsafe cleanup handled by schedule_media_group_processing
-    messages = media_group_messages[media_group_id]
-    logging.info(f"Processing media group {media_group_id} ({len(messages)} messages)")
+        
+    logging.info(f"Processing media group ({len(messages)} messages)")
 
     caption_message = next((msg for msg in messages if msg.caption), None)
     caption = caption_message.caption if caption_message else None
-    caption_entities = caption_message.caption_entities if caption_message else None
 
     photo_urls: list[str] = []
     video_urls: list[str] = []
@@ -384,21 +398,19 @@ async def process_media_group(media_group_id: str, context: ContextTypes.DEFAULT
             if video_url:
                 video_urls.append(video_url)
 
-    text_urls = await get_url_dict_from_message_entities(caption, caption_entities)
-    
+    text_urls: dict[str, str] = {}
     if caption_message:
+        text_urls.update(get_url_dict_from_message(caption_message, is_caption=True))
         text_urls.update(get_button_urls(caption_message))
         
-    await dispatch_message(text=caption, photo_urls=photo_urls, video_urls=video_urls, urls=text_urls)
+    await dispatch_message(context=context, text=caption, photo_urls=photo_urls, video_urls=video_urls, urls=text_urls)
 
 
 async def schedule_media_group_processing(media_group_id: str, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await asyncio.sleep(MEDIA_GROUP_TIMEOUT)
-        await process_media_group(media_group_id, context)
-    finally:
-        if media_group_id in media_group_messages:
-            del media_group_messages[media_group_id]
+    await asyncio.sleep(MEDIA_GROUP_TIMEOUT)
+    messages = media_group_messages.pop(media_group_id, None)
+    if messages:
+        await process_media_group_messages(messages, context)
 
 
 async def channel_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -415,9 +427,9 @@ async def channel_message_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     if message.text:
-        urls = await get_url_dict_from_message_entities(message.text, message.entities)
+        urls = get_url_dict_from_message(message, is_caption=False)
         urls.update(get_button_urls(message))
-        await dispatch_message(text=message.text, photo_urls=[], video_urls=[], urls=urls)
+        await dispatch_message(context=context, text=message.text, photo_urls=[], video_urls=[], urls=urls)
         
     elif message.photo or message.video:
         photo_urls = []
@@ -430,14 +442,15 @@ async def channel_message_handler(update: Update, context: ContextTypes.DEFAULT_
             url = await get_msg_video_url(message)
             if url: video_urls.append(url)
             
-        text_urls = await get_url_dict_from_message_entities(message.caption, message.caption_entities)
+        text_urls = get_url_dict_from_message(message, is_caption=True)
         text_urls.update(get_button_urls(message))
         
-        await dispatch_message(text=message.caption, photo_urls=photo_urls, video_urls=video_urls, urls=text_urls)
+        await dispatch_message(context=context, text=message.caption, photo_urls=photo_urls, video_urls=video_urls, urls=text_urls)
 
 
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(bot_token).build()
+    app = ApplicationBuilder().token(bot_token).post_init(post_init).post_stop(post_stop).build()
+    
     app.add_handlers([
         CommandHandler("start", start),
         MessageHandler(filters.ChatType.CHANNEL, channel_message_handler, block=True),
