@@ -4,8 +4,9 @@ import time
 import json
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
 import tempfile
-from typing import Any, Sequence
+from typing import Any
 
 import httpx
 from dotenv import load_dotenv
@@ -21,9 +22,18 @@ from telegram.ext import (
 
 load_dotenv()
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+# --- Logging Configuration ---
+log_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+file_handler = RotatingFileHandler(
+    "forwarder.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
 )
+file_handler.setFormatter(log_formatter)
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+
+logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
 
 # --- Configuration & Validation ---
 channel_ids_env = os.getenv("CHANNEL_IDS", "-100_00000_00000")
@@ -67,6 +77,8 @@ if not all([FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_WEBHOOK_URL]):
 media_group_messages: dict[str, list[Message]] = {}
 MEDIA_GROUP_TIMEOUT = 5
 
+_feishu_token_lock = asyncio.Lock()
+
 # --- Lifecycle Hooks ---
 
 async def post_init(application: Application):
@@ -105,8 +117,14 @@ async def extract_thumbnail_from_url(video_url: str) -> bytes | None:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE
         )
-        await process.communicate()
-        
+        try:
+            await asyncio.wait_for(process.communicate(), timeout=15.0)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.communicate()
+            logging.error("FFmpeg thumbnail extraction timed out and was terminated.")
+            return None
+            
         if process.returncode == 0 and os.path.exists(out_path):
             with open(out_path, 'rb') as f:
                 return f.read()
@@ -165,8 +183,8 @@ async def send_to_qq(context: ContextTypes.DEFAULT_TYPE, text: str | None, photo
 
         response = await http_client.post(post_url, json=json_data)
         response.raise_for_status()
-    except Exception:
-        logging.exception("QQ Sender failed")
+    except httpx.HTTPError:
+        logging.exception("QQ Sender HTTP request failed")
 
 
 async def send_to_discord(context: ContextTypes.DEFAULT_TYPE, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
@@ -202,7 +220,7 @@ async def send_to_discord(context: ContextTypes.DEFAULT_TYPE, text: str | None, 
                 files.append((f"files[{i}]", (f"video_cover_{i}.jpg", thumbnail_bytes, "image/jpeg")))
                 
         if video_urls:
-            payload["content"] += "\n\n🎬 [Video Received - View in Telegram/QQ]"
+            payload["content"] += "\n\n汐 [Video Received - View in Telegram/QQ]"
 
         data = {"payload_json": json.dumps(payload)}
 
@@ -218,9 +236,9 @@ async def send_to_discord(context: ContextTypes.DEFAULT_TYPE, text: str | None, 
         if e.response.status_code == 413:
             logging.error("Discord Payload Too Large (413).")
         else:
-            logging.error(f"Discord API HTTP error: {e}")
-    except Exception:
-        logging.exception("Discord API error")
+            logging.error(f"Discord API HTTP Status error: {e}")
+    except httpx.HTTPError:
+        logging.exception("Discord API Network error")
 
 
 async def get_feishu_tenant_access_token(context: ContextTypes.DEFAULT_TYPE) -> str | None:
@@ -230,53 +248,69 @@ async def get_feishu_tenant_access_token(context: ContextTypes.DEFAULT_TYPE) -> 
     cached_token = bot_data.get("feishu_token")
     token_expiry = bot_data.get("feishu_token_expiry", 0)
     
-    # Return cached token if it is valid for at least another 5 minutes
     if cached_token and current_time < (token_expiry - 300):
         return cached_token
 
-    http_client: httpx.AsyncClient = bot_data["http_client"]
-    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-    payload = {"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET}
-    
-    try:
-        response = await http_client.post(url, json=payload)
-        response.raise_for_status()
-        resp_json = response.json()
+    async with _feishu_token_lock:
+        current_time = time.time()
+        if bot_data.get("feishu_token_expiry", 0) > current_time + 300:
+            return bot_data["feishu_token"]
+
+        http_client: httpx.AsyncClient = bot_data["http_client"]
+        url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+        payload = {"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET}
         
-        token = resp_json.get("tenant_access_token")
-        expire = resp_json.get("expire", 7200)
-        
-        if token:
-            bot_data["feishu_token"] = token
-            bot_data["feishu_token_expiry"] = current_time + expire
+        try:
+            response = await http_client.post(url, json=payload)
+            response.raise_for_status()
+            resp_json = response.json()
             
-        return token
-    except Exception:
-        logging.exception("Failed to retrieve Feishu tenant access token")
-        return None
+            token = resp_json.get("tenant_access_token")
+            expire = resp_json.get("expire", 7200)
+            
+            if token:
+                bot_data["feishu_token"] = token
+                bot_data["feishu_token_expiry"] = current_time + expire
+                
+            return token
+        except httpx.HTTPError:
+            logging.exception("HTTP error while retrieving Feishu tenant access token")
+            return None
 
 
 async def upload_image_to_feishu(http_client: httpx.AsyncClient, token: str, photo_url: str) -> str | None:
     try:
-        img_response = await http_client.get(photo_url)
-        img_response.raise_for_status()
-        
-        upload_url = "https://open.feishu.cn/open-apis/im/v1/images"
-        headers = {"Authorization": f"Bearer {token}"}
-        data = {"image_type": "message"}
-        files = {"image": ("image.jpg", img_response.content, "image/jpeg")}
-        
-        response = await http_client.post(upload_url, headers=headers, data=data, files=files)
-        response.raise_for_status()
-        
-        resp_json = response.json()
-        if resp_json.get("code") == 0:
-            return resp_json.get("data", {}).get("image_key")
-        else:
-            logging.error(f"Feishu image upload error: {resp_json}")
-            return None
-    except Exception:
-        logging.exception("Failed to upload image to Feishu")
+        async with http_client.stream("GET", photo_url) as img_response:
+            img_response.raise_for_status()
+            
+            upload_url = "https://open.feishu.cn/open-apis/im/v1/images"
+            headers = {"Authorization": f"Bearer {token}"}
+            data = {"image_type": "message"}
+            
+            fd, temp_path = tempfile.mkstemp(suffix=".jpg")
+            os.close(fd)
+            try:
+                with open(temp_path, "wb") as f:
+                    async for chunk in img_response.aiter_bytes():
+                        f.write(chunk)
+                
+                with open(temp_path, "rb") as f:
+                    files = {"image": ("image.jpg", f, "image/jpeg")}
+                    response = await http_client.post(upload_url, headers=headers, data=data, files=files)
+                    response.raise_for_status()
+                    
+                    resp_json = response.json()
+                    if resp_json.get("code") == 0:
+                        return resp_json.get("data", {}).get("image_key")
+                    else:
+                        logging.error(f"Feishu image upload error: {resp_json}")
+                        return None
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+    except httpx.HTTPError:
+        logging.exception("HTTP error during Feishu image download/upload")
         return None
 
 
@@ -308,7 +342,7 @@ async def send_to_feishu(context: ContextTypes.DEFAULT_TYPE, text: str | None, p
                     post_content.append([{"tag": "img", "image_key": image_key}])
 
         for video_url in video_urls:
-            post_content.append([{"tag": "text", "text": "🎬 [Video Received - View in Telegram/QQ/Discord]"}])
+            post_content.append([{"tag": "text", "text": "汐 [Video Received - View in Telegram/QQ/Discord]"}])
             
             if token:
                 thumbnail_bytes = await extract_thumbnail_from_url(video_url)
@@ -345,8 +379,8 @@ async def send_to_feishu(context: ContextTypes.DEFAULT_TYPE, text: str | None, p
         if res.json().get("code") != 0:
             logging.error(f"Feishu Webhook failed: {res.text}")
 
-    except Exception:
-        logging.exception("Feishu API error")
+    except httpx.HTTPError:
+        logging.exception("Feishu API HTTP error")
 
 
 # --- Dispatcher ---
@@ -382,7 +416,7 @@ def get_button_urls(message: Message) -> list[tuple[str, str]]:
         for row in message.reply_markup.inline_keyboard:
             for button in row:
                 if button.url:
-                    urls.append((f"🔗 {button.text}", button.url))
+                    urls.append((f"迫 {button.text}", button.url))
     return urls
 
 
