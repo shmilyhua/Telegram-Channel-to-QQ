@@ -241,7 +241,7 @@ async def send_to_discord(bot_data: dict, text: str | None, photo_urls: list[str
                 files.append((f"files[{i}]", (f"video_cover_{i}.jpg", thumbnail_bytes, "image/jpeg")))
                 
         if video_urls:
-            payload["content"] += "\n\n汐 [Video Received - View in Telegram/QQ]"
+            payload["content"] += "\n\n🎥 [Video Received - View in Telegram/QQ]"
 
         data = {"payload_json": json.dumps(payload)}
 
@@ -362,7 +362,7 @@ async def send_to_feishu(bot_data: dict, text: str | None, photo_urls: list[str]
                     post_content.append([{"tag": "img", "image_key": image_key}])
 
         for video_url in video_urls:
-            post_content.append([{"tag": "text", "text": "汐 [Video Received - View in Telegram/QQ/Discord]"}])
+            post_content.append([{"tag": "text", "text": "🎥 [Video Received - View in Telegram/QQ/Discord]"}])
             
             if token:
                 thumbnail_bytes = await extract_thumbnail_from_url(video_url)
@@ -436,7 +436,7 @@ def get_button_urls(message: Message) -> list[tuple[str, str]]:
         for row in message.reply_markup.inline_keyboard:
             for button in row:
                 if button.url:
-                    urls.append((f"迫 {button.text}", button.url))
+                    urls.append((f"🔗 {button.text}", button.url))
     return urls
 
 
