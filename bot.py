@@ -4,7 +4,8 @@ import time
 import json
 import asyncio
 import logging
-from logging.handlers import RotatingFileHandler
+import queue
+from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
 import tempfile
 from typing import Any
 
@@ -22,18 +23,23 @@ from telegram.ext import (
 
 load_dotenv()
 
-# --- Logging Configuration ---
+# --- Logging Configuration (Non-Blocking) ---
 log_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 file_handler = RotatingFileHandler(
     "forwarder.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
 )
-file_handler.setFormatter(log_formatter)
-
 console_handler = logging.StreamHandler()
+file_handler.setFormatter(log_formatter)
 console_handler.setFormatter(log_formatter)
 
-logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
+log_queue = queue.Queue(-1)
+queue_handler = QueueHandler(log_queue)
+
+logging.basicConfig(level=logging.INFO, handlers=[queue_handler])
+
+log_listener = QueueListener(log_queue, file_handler, console_handler)
+log_listener.start()
 
 # --- Configuration & Validation ---
 channel_ids_env = os.getenv("CHANNEL_IDS", "-100_00000_00000")
@@ -75,6 +81,7 @@ if not all([FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_WEBHOOK_URL]):
 
 # State
 media_group_messages: dict[str, list[Message]] = {}
+media_group_tasks: dict[str, asyncio.Task] = {}
 MEDIA_GROUP_TIMEOUT = 5
 
 _feishu_token_lock = asyncio.Lock()
@@ -87,9 +94,23 @@ async def post_init(application: Application):
     )
 
 async def post_stop(application: Application):
+    logging.info("Executing graceful shutdown sequence. Flushing pending media groups.")
+    
+    for task in media_group_tasks.values():
+        task.cancel()
+    
+    for messages in media_group_messages.values():
+        if messages:
+            await process_media_group_messages(messages, application.bot_data)
+            
+    media_group_messages.clear()
+    media_group_tasks.clear()
+
     http_client: httpx.AsyncClient | None = application.bot_data.get("http_client")
     if http_client:
         await http_client.aclose()
+        
+    log_listener.stop()
 
 
 # --- Utility Functions ---
@@ -139,11 +160,11 @@ async def extract_thumbnail_from_url(video_url: str) -> bytes | None:
 
 # --- Platform Sender Implementations ---
 
-async def send_to_qq(context: ContextTypes.DEFAULT_TYPE, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
+async def send_to_qq(bot_data: dict, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
     if not NAPCAT_URL or not QQ_GROUP_ID:
         return
 
-    http_client: httpx.AsyncClient = context.bot_data["http_client"]
+    http_client: httpx.AsyncClient = bot_data["http_client"]
 
     try:
         content_list: list[dict[str, Any]] = []
@@ -187,11 +208,11 @@ async def send_to_qq(context: ContextTypes.DEFAULT_TYPE, text: str | None, photo
         logging.exception("QQ Sender HTTP request failed")
 
 
-async def send_to_discord(context: ContextTypes.DEFAULT_TYPE, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
+async def send_to_discord(bot_data: dict, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
     if not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
         return
 
-    http_client: httpx.AsyncClient = context.bot_data["http_client"]
+    http_client: httpx.AsyncClient = bot_data["http_client"]
     api_url = f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages"
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
     
@@ -241,8 +262,7 @@ async def send_to_discord(context: ContextTypes.DEFAULT_TYPE, text: str | None, 
         logging.exception("Discord API Network error")
 
 
-async def get_feishu_tenant_access_token(context: ContextTypes.DEFAULT_TYPE) -> str | None:
-    bot_data = context.bot_data
+async def get_feishu_tenant_access_token(bot_data: dict) -> str | None:
     current_time = time.time()
     
     cached_token = bot_data.get("feishu_token")
@@ -314,14 +334,14 @@ async def upload_image_to_feishu(http_client: httpx.AsyncClient, token: str, pho
         return None
 
 
-async def send_to_feishu(context: ContextTypes.DEFAULT_TYPE, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
+async def send_to_feishu(bot_data: dict, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
     if not FEISHU_WEBHOOK_URL:
         return
 
-    http_client: httpx.AsyncClient = context.bot_data["http_client"]
+    http_client: httpx.AsyncClient = bot_data["http_client"]
 
     try:
-        token = await get_feishu_tenant_access_token(context)
+        token = await get_feishu_tenant_access_token(bot_data)
         if not token:
             logging.error("Feishu Webhook warning: App ID/Secret missing or invalid. Images will fail to upload.")
 
@@ -385,11 +405,11 @@ async def send_to_feishu(context: ContextTypes.DEFAULT_TYPE, text: str | None, p
 
 # --- Dispatcher ---
 
-async def dispatch_message(context: ContextTypes.DEFAULT_TYPE, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
+async def dispatch_message(bot_data: dict, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
     tasks = [
-        send_to_qq(context, text, photo_urls, video_urls, urls),
-        send_to_discord(context, text, photo_urls, video_urls, urls),
-        send_to_feishu(context, text, photo_urls, video_urls, urls)
+        send_to_qq(bot_data, text, photo_urls, video_urls, urls),
+        send_to_discord(bot_data, text, photo_urls, video_urls, urls),
+        send_to_feishu(bot_data, text, photo_urls, video_urls, urls)
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
@@ -447,7 +467,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Forwarder Bot is running.")
 
 
-async def process_media_group_messages(messages: list[Message], context: ContextTypes.DEFAULT_TYPE):
+async def process_media_group_messages(messages: list[Message], bot_data: dict):
     if not messages:
         return
         
@@ -474,14 +494,19 @@ async def process_media_group_messages(messages: list[Message], context: Context
         text_urls.extend(get_url_dict_from_message(caption_message, is_caption=True))
         text_urls.extend(get_button_urls(caption_message))
         
-    await dispatch_message(context=context, text=caption, photo_urls=photo_urls, video_urls=video_urls, urls=text_urls)
+    await dispatch_message(bot_data=bot_data, text=caption, photo_urls=photo_urls, video_urls=video_urls, urls=text_urls)
 
 
-async def schedule_media_group_processing(media_group_id: str, context: ContextTypes.DEFAULT_TYPE):
-    await asyncio.sleep(MEDIA_GROUP_TIMEOUT)
-    messages = media_group_messages.pop(media_group_id, None)
-    if messages:
-        await process_media_group_messages(messages, context)
+async def schedule_media_group_processing(media_group_id: str, bot_data: dict):
+    try:
+        await asyncio.sleep(MEDIA_GROUP_TIMEOUT)
+        messages = media_group_messages.pop(media_group_id, None)
+        if messages:
+            await process_media_group_messages(messages, bot_data)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        media_group_tasks.pop(media_group_id, None)
 
 
 async def channel_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -493,14 +518,15 @@ async def channel_message_handler(update: Update, context: ContextTypes.DEFAULT_
     if message.media_group_id:
         if message.media_group_id not in media_group_messages:
             media_group_messages[message.media_group_id] = []
-            asyncio.create_task(schedule_media_group_processing(message.media_group_id, context))
+            task = asyncio.create_task(schedule_media_group_processing(message.media_group_id, context.bot_data))
+            media_group_tasks[message.media_group_id] = task
         media_group_messages[message.media_group_id].append(message)
         return
 
     if message.text:
         urls = get_url_dict_from_message(message, is_caption=False)
         urls.extend(get_button_urls(message))
-        await dispatch_message(context=context, text=message.text, photo_urls=[], video_urls=[], urls=urls)
+        await dispatch_message(bot_data=context.bot_data, text=message.text, photo_urls=[], video_urls=[], urls=urls)
         
     elif message.photo or message.video:
         photo_urls = []
@@ -516,7 +542,7 @@ async def channel_message_handler(update: Update, context: ContextTypes.DEFAULT_
         text_urls = get_url_dict_from_message(message, is_caption=True)
         text_urls.extend(get_button_urls(message))
         
-        await dispatch_message(context=context, text=message.caption, photo_urls=photo_urls, video_urls=video_urls, urls=text_urls)
+        await dispatch_message(bot_data=context.bot_data, text=message.caption, photo_urls=photo_urls, video_urls=video_urls, urls=text_urls)
 
 
 if __name__ == "__main__":
