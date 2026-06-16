@@ -362,7 +362,7 @@ async def send_to_feishu(bot_data: dict, text: str | None, photo_urls: list[str]
                     post_content.append([{"tag": "img", "image_key": image_key}])
 
         for video_url in video_urls:
-            post_content.append([{"tag": "text", "text": "🎥 [Video Received - View in Telegram/QQ/Discord]"}])
+            post_content.append([{"tag": "text", "text": "🎥 [Video Received - View in Telegram/QQ]"}])
             
             if token:
                 thumbnail_bytes = await extract_thumbnail_from_url(video_url)
