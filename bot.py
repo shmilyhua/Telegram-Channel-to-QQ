@@ -229,17 +229,25 @@ async def send_to_qq(bot_data: dict, text: str | None, photo_urls: list[str], vi
                     
                 return
                 
-            except (httpx.ConnectError, httpx.WriteError, httpx.TimeoutException, RuntimeError) as e:
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.WriteError, httpx.WriteTimeout, RuntimeError) as e:
+                # Safe to retry: The request failed to reach NapCat, failed during transmission, 
+                # or NapCat explicitly reported an internal failure (e.g., the ECONNRESET bug).
                 if attempt == max_retries - 1:
                     logging.error(f"QQ Sender failed after {max_retries} attempts: {e}")
                 else:
-                    logging.warning(f"QQ Sender failure (attempt {attempt + 1}), retrying in 2 seconds. Error: {e}")
+                    logging.warning(f"QQ Sender safe failure (attempt {attempt + 1}), retrying in 2 seconds. Error: {e}")
                     await asyncio.sleep(2)
                     
+            except (httpx.ReadTimeout, httpx.ReadError) as e:
+                # Unsafe to retry: The request reached NapCat, but NapCat took too long to respond.
+                # NapCat is likely still processing the video. Retrying here creates duplicates.
+                logging.error(f"QQ Sender Read Timeout/Error. Dropping retry to prevent duplicates. Error: {e}")
+                return
+                
             except httpx.HTTPError as e:
+                # Catch 500 Internal Server Errors, 404s, etc.
                 logging.error(f"QQ Sender HTTP request failed: {e}")
                 return
-
     except Exception:
         logging.exception("QQ Sender encountered an unexpected error")
 
