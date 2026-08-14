@@ -205,11 +205,11 @@ async def send_to_qq(bot_data: dict, text: str | None, photo_urls: list[str], vi
         # Calculate dynamic timeout based on media classification
         size_in_mb = total_media_bytes / (1024 * 1024)
         if video_urls:
-            request_timeout = 60.0 + (size_in_mb * 40.0)
+            request_timeout = 60.0 + (size_in_mb * 60.0)
         elif photo_urls:
-            request_timeout = 15.0 + (size_in_mb * 2.0)
+            request_timeout = 30.0 + (size_in_mb * 30.0)
         else:
-            request_timeout = 10.0
+            request_timeout = 15.0
 
         # Implement Strict Retry Logic
         max_retries = 3
