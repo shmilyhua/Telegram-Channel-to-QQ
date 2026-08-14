@@ -160,7 +160,7 @@ async def extract_thumbnail_from_url(video_url: str) -> bytes | None:
 
 # --- Platform Sender Implementations ---
 
-async def send_to_qq(bot_data: dict, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
+async def send_to_qq(bot_data: dict, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]], total_media_bytes: int = 0):
     if not NAPCAT_URL or not QQ_GROUP_ID:
         return
 
@@ -202,10 +202,46 @@ async def send_to_qq(bot_data: dict, text: str | None, photo_urls: list[str], vi
             ]
             json_data = {"group_id": QQ_GROUP_ID, "messages": messages_list}
 
-        response = await http_client.post(post_url, json=json_data)
-        response.raise_for_status()
-    except httpx.HTTPError:
-        logging.exception("QQ Sender HTTP request failed")
+        # Calculate dynamic timeout based on media classification
+        size_in_mb = total_media_bytes / (1024 * 1024)
+        if video_urls:
+            request_timeout = 60.0 + (size_in_mb * 40.0)
+        elif photo_urls:
+            request_timeout = 15.0 + (size_in_mb * 2.0)
+        else:
+            request_timeout = 10.0
+
+        # Implement Strict Retry Logic
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = await http_client.post(
+                    post_url, 
+                    json=json_data,
+                    timeout=request_timeout
+                )
+                response.raise_for_status()
+                
+                resp_json = response.json()
+                if resp_json.get("status") == "failed":
+                    error_msg = resp_json.get("message", "Unknown API error")
+                    raise RuntimeError(f"NapCat API Action Failed: {error_msg}")
+                    
+                return
+                
+            except (httpx.ConnectError, httpx.WriteError, httpx.TimeoutException, RuntimeError) as e:
+                if attempt == max_retries - 1:
+                    logging.error(f"QQ Sender failed after {max_retries} attempts: {e}")
+                else:
+                    logging.warning(f"QQ Sender failure (attempt {attempt + 1}), retrying in 2 seconds. Error: {e}")
+                    await asyncio.sleep(2)
+                    
+            except httpx.HTTPError as e:
+                logging.error(f"QQ Sender HTTP request failed: {e}")
+                return
+
+    except Exception:
+        logging.exception("QQ Sender encountered an unexpected error")
 
 
 async def send_to_discord(bot_data: dict, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
@@ -405,9 +441,9 @@ async def send_to_feishu(bot_data: dict, text: str | None, photo_urls: list[str]
 
 # --- Dispatcher ---
 
-async def dispatch_message(bot_data: dict, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]]):
+async def dispatch_message(bot_data: dict, text: str | None, photo_urls: list[str], video_urls: list[str], urls: list[tuple[str, str]], total_media_bytes: int = 0):
     tasks = [
-        send_to_qq(bot_data, text, photo_urls, video_urls, urls),
+        send_to_qq(bot_data, text, photo_urls, video_urls, urls, total_media_bytes),
         send_to_discord(bot_data, text, photo_urls, video_urls, urls),
         send_to_feishu(bot_data, text, photo_urls, video_urls, urls)
     ]
@@ -478,13 +514,16 @@ async def process_media_group_messages(messages: list[Message], bot_data: dict):
 
     photo_urls: list[str] = []
     video_urls: list[str] = []
+    total_media_bytes: int = 0
     
     for msg in messages:
         if msg.photo:
+            total_media_bytes += msg.photo[-1].file_size or 0
             photo_url = await get_msg_photo_url(msg)
             if photo_url:
                 photo_urls.append(photo_url)
         elif msg.video:
+            total_media_bytes += msg.video.file_size or 0
             video_url = await get_msg_video_url(msg)
             if video_url:
                 video_urls.append(video_url)
@@ -494,7 +533,7 @@ async def process_media_group_messages(messages: list[Message], bot_data: dict):
         text_urls.extend(get_url_dict_from_message(caption_message, is_caption=True))
         text_urls.extend(get_button_urls(caption_message))
         
-    await dispatch_message(bot_data=bot_data, text=caption, photo_urls=photo_urls, video_urls=video_urls, urls=text_urls)
+    await dispatch_message(bot_data=bot_data, text=caption, photo_urls=photo_urls, video_urls=video_urls, urls=text_urls, total_media_bytes=total_media_bytes)
 
 
 async def schedule_media_group_processing(media_group_id: str, bot_data: dict):
@@ -526,23 +565,26 @@ async def channel_message_handler(update: Update, context: ContextTypes.DEFAULT_
     if message.text:
         urls = get_url_dict_from_message(message, is_caption=False)
         urls.extend(get_button_urls(message))
-        await dispatch_message(bot_data=context.bot_data, text=message.text, photo_urls=[], video_urls=[], urls=urls)
+        await dispatch_message(bot_data=context.bot_data, text=message.text, photo_urls=[], video_urls=[], urls=urls, total_media_bytes=0)
         
     elif message.photo or message.video:
         photo_urls = []
         video_urls = []
+        total_media_bytes = 0
         
         if message.photo:
+            total_media_bytes += message.photo[-1].file_size or 0
             url = await get_msg_photo_url(message)
             if url: photo_urls.append(url)
         if message.video:
+            total_media_bytes += message.video.file_size or 0
             url = await get_msg_video_url(message)
             if url: video_urls.append(url)
             
         text_urls = get_url_dict_from_message(message, is_caption=True)
         text_urls.extend(get_button_urls(message))
         
-        await dispatch_message(bot_data=context.bot_data, text=message.caption, photo_urls=photo_urls, video_urls=video_urls, urls=text_urls)
+        await dispatch_message(bot_data=context.bot_data, text=message.caption, photo_urls=photo_urls, video_urls=video_urls, urls=text_urls, total_media_bytes=total_media_bytes)
 
 
 if __name__ == "__main__":
