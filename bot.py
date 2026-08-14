@@ -57,6 +57,10 @@ QQ_GROUP_ID = int(qq_group_id_env) if qq_group_id_env else 0
 qq_id_env = os.getenv("QQ_ID", "")
 QQ_ID = int(qq_id_env) if qq_id_env else 10000
 
+# Add this line to load your personal QQ number
+admin_qq_id_env = os.getenv("ADMIN_QQ_ID", "")
+ADMIN_QQ_ID = int(admin_qq_id_env) if admin_qq_id_env else 0
+
 QQ_NICKNAME = os.getenv("QQ_NICKNAME", "QQ")
 
 if bool(NAPCAT_URL) != bool(QQ_GROUP_ID):
@@ -239,9 +243,28 @@ async def send_to_qq(bot_data: dict, text: str | None, photo_urls: list[str], vi
                     await asyncio.sleep(2)
                     
             except (httpx.ReadTimeout, httpx.ReadError) as e:
-                # Unsafe to retry: The request reached NapCat, but NapCat took too long to respond.
-                # NapCat is likely still processing the video. Retrying here creates duplicates.
-                logging.error(f"QQ Sender Read Timeout/Error. Dropping retry to prevent duplicates. Error: {e}")
+                logging.warning(f"QQ Sender Read Timeout. Sending fallback to private DM to cache media. Error: {e}")
+                
+                if not ADMIN_QQ_ID:
+                    logging.warning("ADMIN_QQ_ID is not set. Skipping private DM fallback.")
+                    return
+                
+                private_post_url = f"{NAPCAT_URL}/send_private_msg"
+                private_json_data = {
+                    "user_id": ADMIN_QQ_ID, 
+                    "message": content_list
+                }
+                
+                try:
+                    await http_client.post(
+                        private_post_url, 
+                        json=private_json_data, 
+                        timeout=request_timeout
+                    )
+                    logging.info("Private DM fallback executed successfully. Media cached on CDN.")
+                except Exception as fallback_e:
+                    logging.error(f"Private DM fallback failed: {fallback_e}")
+                    
                 return
                 
             except httpx.HTTPError as e:
