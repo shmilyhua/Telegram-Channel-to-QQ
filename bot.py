@@ -527,6 +527,17 @@ async def get_msg_video_url(message: Message) -> str | None:
     return None
 
 
+async def get_msg_animation_url(message: Message) -> str | None:
+    if message.animation:
+        if message.animation.file_size and message.animation.file_size > 20 * 1024 * 1024:
+            logging.warning(f"Animation size ({message.animation.file_size} bytes) exceeds the 20MB Telegram Bot API download limit. Skipping.")
+            return None
+        file = await message.animation.get_file()
+        assert file.file_path is not None
+        return file.file_path
+    return None
+
+
 # --- Telegram Handlers ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -546,6 +557,7 @@ async def process_media_group_messages(messages: list[Message], bot_data: dict):
     photo_urls: list[str] = []
     video_urls: list[str] = []
     total_media_bytes: int = 0
+
     
     for msg in messages:
         if msg.photo:
@@ -558,6 +570,12 @@ async def process_media_group_messages(messages: list[Message], bot_data: dict):
             video_url = await get_msg_video_url(msg)
             if video_url:
                 video_urls.append(video_url)
+        elif msg.animation:                                  # <--- Added handle
+            total_media_bytes += msg.animation.file_size or 0
+            video_url = await get_msg_animation_url(msg)
+            if video_url:
+                video_urls.append(video_url)
+
 
     text_urls: list[tuple[str, str]] = []
     if caption_message:
@@ -598,11 +616,11 @@ async def channel_message_handler(update: Update, context: ContextTypes.DEFAULT_
         urls.extend(get_button_urls(message))
         await dispatch_message(bot_data=context.bot_data, text=message.text, photo_urls=[], video_urls=[], urls=urls, total_media_bytes=0)
         
-    elif message.photo or message.video:
+    elif message.photo or message.video or message.animation: # <--- Added message.animation
         photo_urls = []
         video_urls = []
         total_media_bytes = 0
-        
+
         if message.photo:
             total_media_bytes += message.photo[-1].file_size or 0
             url = await get_msg_photo_url(message)
@@ -611,6 +629,11 @@ async def channel_message_handler(update: Update, context: ContextTypes.DEFAULT_
             total_media_bytes += message.video.file_size or 0
             url = await get_msg_video_url(message)
             if url: video_urls.append(url)
+        if message.animation:                                 # <--- Handle the animation
+            total_media_bytes += message.animation.file_size or 0
+            url = await get_msg_animation_url(message)
+            if url: video_urls.append(url)
+
             
         text_urls = get_url_dict_from_message(message, is_caption=True)
         text_urls.extend(get_button_urls(message))
